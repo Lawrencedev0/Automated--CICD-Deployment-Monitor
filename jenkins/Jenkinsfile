@@ -1,0 +1,150 @@
+// ─────────────────────────────────────────────────────────────
+// Jenkinsfile — Declarative CI/CD pipeline for the monitoring
+// system. Builds, tests, pushes and deploys the sample app, then
+// verifies health. Every stage result is reported to Slack.
+//
+// Expected pipeline parameters / env:
+//   SLACK_WEBHOOK_URL , DOCKER_REGISTRY , DOCKER_USER , DOCKER_TOKEN
+//   IMAGE_NAME , IMAGE_TAG , APP_HEALTH_URL
+//
+// Credentials referenced here must exist in Jenkins:
+//   dockerhub (username/password) , ssh-key
+// ─────────────────────────────────────────────────────────────
+pipeline {
+    agent any
+
+    environment {
+        // Provided via Jenkins credentials store
+        DOCKER_HUB_CREDS = credentials('dockerhub')
+
+        // Common values (override per repo if needed)
+        REGISTRY   = "${env.DOCKER_REGISTRY ?: 'docker.io'}"
+        IMAGE      = "${env.IMAGE_NAME ?: 'sample-app'}"
+        TAG        = "${env.IMAGE_TAG ?: 'latest'}"
+        HEALTH_URL = "${env.APP_HEALTH_URL ?: 'http://localhost:5000/health'}"
+        PIPELINE_NAME = "sample-app"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "Cloning repository..."
+                checkout scm
+                echo "Checked out ${env.GIT_COMMIT ?: 'unknown'} on ${env.BRANCH_NAME ?: 'main'}"
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    set -e
+                    cd sample-app
+                    docker build -t ${PIPELINE_NAME}:build-${BUILD_NUMBER} .
+                    docker tag ${PIPELINE_NAME}:build-${BUILD_NUMBER} ${PIPELINE_NAME}:${TAG}
+                '''
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                sh '''
+                    set -e
+                    cd sample-app
+                    # Run container and execute unit tests inside it
+                    docker run --rm ${PIPELINE_NAME}:build-${BUILD_NUMBER} \
+                        python -m unittest discover -s tests -v
+                '''
+            }
+        }
+
+        stage('Push Image') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_TOKEN'
+                )]) {
+                    sh '''
+                        set -e
+                        echo "${DOCKER_TOKEN}" | docker login ${REGISTRY} -u "${DOCKER_USER}" --password-stdin
+                        docker tag ${PIPELINE_NAME}:${TAG} ${DOCKER_USER}/${IMAGE}:${TAG}
+                        docker push ${DOCKER_USER}/${IMAGE}:${TAG}
+                        docker logout ${REGISTRY}
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                // Deploy on the same host (Docker out of Docker).
+                // For remote EC2 deployment, use the ssh-based script
+                // (see scripts/deploy_remote.sh).
+                sh '''
+                    set -e
+                    # Stop & remove old container (ignore errors when absent)
+                    docker rm -f ${PIPELINE_NAME} 2>/dev/null || true
+                    # Run updated container
+                    docker run -d --name ${PIPELINE_NAME} \
+                        -p 5000:5000 \
+                        --restart unless-stopped \
+                        ${PIPELINE_NAME}:${TAG}
+                '''
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                sh '''
+                    set -e
+                    echo "Waiting for app to become ready..."
+                    for i in $(seq 1 10); do
+                        STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${HEALTH_URL} || true)
+                        if [ "${STATUS}" = "200" ]; then
+                            echo "Health check passed (HTTP 200)"
+                            exit 0
+                        fi
+                        echo "Attempt $i: HTTP ${STATUS} — retrying..."
+                        sleep 3
+                    done
+                    echo "Health check FAILED" >&2
+                    exit 1
+                '''
+            }
+        }
+    }
+
+    post {
+        // Notify Slack on every pipeline outcome
+        success {
+            echo 'Pipeline succeeded — notifying Slack'
+            slackSend(
+                channel: "${env.SLACK_CHANNEL ?: '#ci-cd-notifications'}",
+                color: 'good',
+                message: "✅ *${PIPELINE_NAME}* deployment succeeded on `${env.BUILD_NUMBER}` — health check passed. ${env.BUILD_URL}"
+            )
+        }
+        failure {
+            echo 'Pipeline failed — notifying Slack'
+            slackSend(
+                channel: "${env.SLACK_CHANNEL ?: '#ci-cd-notifications'}",
+                color: 'danger',
+                message: "❌ *${PIPELINE_NAME}* deployment FAILED on `${env.BUILD_NUMBER}`. Check ${env.BUILD_URL}"
+            )
+        }
+        unstable {
+            echo 'Pipeline unstable — notifying Slack'
+            slackSend(
+                channel: "${env.SLACK_CHANNEL ?: '#ci-cd-notifications'}",
+                color: 'warning',
+                message: "⚠️ *${PIPELINE_NAME}* build `${env.BUILD_NUMBER}` is unstable. ${env.BUILD_URL}"
+            )
+        }
+        always {
+            // Cleanup intermediate build images (keep tagged "latest")
+            sh '''
+                docker rmi ${PIPELINE_NAME}:build-${BUILD_NUMBER} 2>/dev/null || true
+            '''
+        }
+    }
+}

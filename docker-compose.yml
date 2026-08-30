@@ -1,0 +1,46 @@
+# ─────────────────────────────────────────────────────────────
+# CI/CD Monitoring System — Docker Compose
+#   Starts: Jenkins (with Docker-outside-of-Docker) + Python Monitor
+# Usage:
+#   cp .env.example .env   (edit values)
+#   docker-compose up -d --build
+# ─────────────────────────────────────────────────────────────
+version: "3.8"
+
+services:
+  jenkins:
+    image: jenkins/jenkins:lts-jdk11
+    container_name: jenkins
+    restart: unless-stopped
+    privileged: true
+    user: root
+    ports:
+      - "8080:8080"   # Jenkins UI / API
+      - "50000:50000" # Jenkins agent (JNLP)
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+    networks:
+      - cicd-net
+
+  monitor:
+    build: ./monitoring
+    container_name: cicd-monitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - JENKINS_URL=http://jenkins:8080
+    depends_on:
+      - jenkins
+    networks:
+      - cicd-net
+
+volumes:
+  jenkins_home:
+
+networks:
+  cicd-net:
+    driver: bridge
