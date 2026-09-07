@@ -1,7 +1,5 @@
-# Automated--CICD-Deployment-Monitor
-Automated CI/CD Deployment Monitoring System using Jenkins, Docker, Python, AWS EC2, and Slack Notifications.
-=======
-# Automated CI/CD Deployment Monitoring System
+#Automated CI/CD Deployment Monitoring System using Jenkins, Docker, Python, AWS EC2, and Slack Notifications.
+===========================================================================================================================
 
 A production-ready blueprint that combines **Jenkins**, **Docker**, **Python**, **AWS EC2**, and **Slack Notifications** to build, test, deploy, and continuously monitor a containerized application — with real-time alerts on every build, deploy, and health-check event.
 
